@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>POS Móvil - Pequeño Negocio</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { -webkit-tap-highlight-color: transparent; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans min-h-screen flex flex-col select-none">
+    <div id="app" class="flex-1 flex flex-col max-w-md mx-auto w-full bg-slate-900 shadow-2xl relative overflow-hidden">
+        <!-- Contenido renderizado por JS -->
+    </div>
+
+    <script>
+        // Estado Global de la App PWA
+        const state = {
+            view: 'login', // 'login', 'pos', 'cash', 'expenses', 'inventory', 'settings'
+            businessId: localStorage.getItem('pos_biz_id') || '',
+            apiKey: localStorage.getItem('pos_api_key') || '',
+            gasUrl: localStorage.getItem('pos_gas_url') || '',
+            businessName: localStorage.getItem('pos_biz_name') || 'Mi Negocio',
+            currency: localStorage.getItem('pos_currency') || '$',
+            isOnline: navigator.onLine,
+            products: JSON.parse(localStorage.getItem('pos_products') || '[]'),
+            cart: [],
+            cashRegister: JSON.parse(localStorage.getItem('pos_cash') || '{"isOpen":false,"openedAt":null,"initialAmount":0,"salesTotal":0,"expensesTotal":0}'),
+            offlineQueue: JSON.parse(localStorage.getItem('pos_offline_queue') || '[]'),
+            syncing: false,
+            error: null,
+            successMsg: null
+        };
+
+        // Detectar conexión online/offline
+        window.addEventListener('online', () => { state.isOnline = true; render(); triggerSync(); });
+        window.addEventListener('offline', () => { state.isOnline = false; render(); });
+
+        function saveLocal() {
+            localStorage.setItem('pos_biz_id', state.businessId);
+            localStorage.setItem('pos_api_key', state.apiKey);
+            localStorage.setItem('pos_gas_url', state.gasUrl);
+            localStorage.setItem('pos_biz_name', state.businessName);
+            localStorage.setItem('pos_currency', state.currency);
+            localStorage.setItem('pos_products', JSON.stringify(state.products));
+            localStorage.setItem('pos_cash', JSON.stringify(state.cashRegister));
+            localStorage.setItem('pos_offline_queue', JSON.stringify(state.offlineQueue));
+        }
+
+        async function triggerSync() {
+            if (!state.isOnline || state.offlineQueue.length === 0 || !state.gasUrl) return;
+            state.syncing = true;
+            render();
+            try {
+                const res = await fetch(state.gasUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                    body: JSON.stringify({
+                        businessId: state.businessId,
+                        apiKey: state.apiKey,
+                        transactions: state.offlineQueue
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    state.offlineQueue = [];
+                    if (data.productos) state.products = data.productos;
+                    if (data.config && data.config.moneda) state.currency = data.config.moneda;
+                    state.successMsg = '¡Sincronización exitosa con Google Sheets!';
+                    setTimeout(() => { state.successMsg = null; render(); }, 3000);
+                }
+            } catch (e) {
+                console.error('Error de sincronización offline:', e);
+            } finally {
+                state.syncing = false;
+                saveLocal();
+                render();
+            }
+        }
+
+        // Renderizado Principal
+        function render() {
+            const app = document.getElementById('app');
+            app.innerHTML = `
+                <!-- Header Común -->
+                <header class="bg-slate-900 border-b border-slate-800 px-4 py-3 flex items-center justify-between sticky top-0 z-40">
+                    <div class="flex items-center gap-2">
+                        <div class="w-8 h-8 rounded-xl bg-indigo-600/20 text-indigo-400 flex items-center justify-center font-bold text-xs border border-indigo-500/30">
+                            ${state.businessName.charAt(0).toUpperCase()}
+                        </div>
+                        <div>
+                            <h1 class="text-sm font-bold text-white truncate max-w-[150px]">${state.businessName}</h1>
+                            <div class="flex items-center gap-1.5">
+                                <span class="w-2 h-2 rounded-full ${state.isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}"></span>
+                                <span class="text-[10px] text-slate-400">${state.isOnline ? 'Online' : 'Offline'}</span>
+                                ${state.offlineQueue.length > 0 ? `<span class="text-[10px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded-full">${state.offlineQueue.length} por sincronizar</span>` : ''}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center gap-2">
+                        ${state.syncing ? '<span class="text-xs text-indigo-400 animate-spin">⟳ Sincronizando...</span>' : ''}
+                        ${state.view !== 'login' ? `<button onclick="logout()" class="text-xs text-slate-400 hover:text-white px-2 py-1 bg-slate-800 rounded-lg">Salir</button>` : ''}
+                    </div>
+                </header>
+
+                <!-- Mensaje de éxito o error flotante -->
+                ${state.error ? `<div class="bg-rose-500/20 border border-rose-500/40 text-rose-300 p-3 m-4 rounded-xl text-xs flex justify-between"><span>${state.error}</span><button onclick="state.error=null;render()">×</button></div>` : ''}
+                ${state.successMsg ? `<div class="bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 p-3 m-4 rounded-xl text-xs">${state.successMsg}</div>` : ''}
+
+                <!-- Vistas -->
+                <div class="flex-1 flex flex-col overflow-y-auto pb-20">
+                    ${state.view === 'login' ? renderLogin() : ''}
+                    ${state.view === 'pos' ? renderPos() : ''}
+                    ${state.view === 'cash' ? renderCash() : ''}
+                    ${state.view === 'expenses' ? renderExpenses() : ''}
+                    ${state.view === 'inventory' ? renderInventory() : ''}
+                    ${state.view === 'settings' ? renderSettings() : ''}
+                </div>
+
+                <!-- Barra de Navegación Inferior (Tabs) -->
+                ${state.view !== 'login' ? `
+                    <nav class="bg-slate-900 border-t border-slate-800 grid grid-cols-5 py-2 px-1 fixed bottom-0 max-w-md w-full z-40">
+                        <button onclick="switchView('pos')" class="flex flex-col items-center justify-center py-1 ${state.view === 'pos' ? 'text-indigo-400' : 'text-slate-400 hover:text-slate-200'}">
+                            <svg class="w-5 h-5 mb-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"></path></svg>
+                            <span class="text-[10px] font-medium">Ventas</span>
+                        </button>
+                        <button onclick="switchView('cash')" class="flex flex-col items-center justify-center py-1 ${state.view === 'cash' ? 'text-indigo-400' : 'text-slate-400 hover:text-slate-200'}">
+                            <svg class="w-5 h-5 mb-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1"></path></svg>
+                            <span class="text-[10px] font-medium">Caja</span>
+                        </button>
+                        <button onclick="switchView('expenses')" class="flex flex-col items-center justify-center py-1 ${state.view === 'expenses' ? 'text-indigo-400' : 'text-slate-400 hover:text-slate-200'}">
+                            <svg class="w-5 h-5 mb-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z"></path></svg>
+                            <span class="text-[10px] font-medium">Gastos</span>
+                        </button>
+                        <button onclick="switchView('inventory')" class="flex flex-col items-center justify-center py-1 ${state.view === 'inventory' ? 'text-indigo-400' : 'text-slate-400 hover:text-slate-200'}">
+                            <svg class="w-5 h-5 mb-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
+                            <span class="text-[10px] font-medium">Inventario</span>
+                        </button>
+                        <button onclick="switchView('settings')" class="flex flex-col items-center justify-center py-1 ${state.view === 'settings' ? 'text-indigo-400' : 'text-slate-400 hover:text-slate-200'}">
+                            <svg class="w-5 h-5 mb-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path></svg>
+                            <span class="text-[10px] font-medium">Ajustes</span>
+                        </button>
+                    </nav>
+                ` : ''}
+            `;
+            lucide.createIcons();
+        }
+
+        // Vistas individuales
+        function renderLogin() {
+            return `
+                <div class="flex-1 flex flex-col justify-center p-6 space-y-6">
+                    <div class="text-center space-y-2">
+                        <div class="w-16 h-16 bg-indigo-600/20 border border-indigo-500/30 rounded-2xl flex items-center justify-center mx-auto text-indigo-400">
+                            <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
+                        </div>
+                        <h2 class="text-xl font-bold text-white">Acceso POS Negocio</h2>
+                        <p class="text-xs text-slate-400">Ingresa tus credenciales o conecta con Google Apps Script.</p>
+                    </div>
+
+                    <form onsubmit="handleLogin(event)" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-medium text-slate-300 mb-1">Business ID</label>
+                            <input type="text" id="login_biz" value="${state.businessId}" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="Ej: NEGOCIO_001">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-slate-300 mb-1">Clave de Acceso (API Key)</label>
+                            <input type="password" id="login_key" value="${state.apiKey}" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="••••••••">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-slate-300 mb-1">URL Web App Google Apps Script</label>
+                            <input type="url" id="login_url" value="${state.gasUrl}" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="https://script.google.com/.../exec">
+                        </div>
+                        <button type="submit" class="w-full py-3.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl text-sm transition-all shadow-lg shadow-indigo-600/30">
+                            Iniciar Sesión / Sincronizar
+                        </button>
+                    </form>
+                </div>
+            `;
+        }
+
+        async function handleLogin(e) {
+            e.preventDefault();
+            state.businessId = document.getElementById('login_biz').value;
+            state.apiKey = document.getElementById('login_key').value;
+            state.gasUrl = document.getElementById('login_url').value;
+            saveLocal();
+
+            if (state.isOnline && state.gasUrl) {
+                try {
+                    const res = await fetch(`${state.gasUrl}?businessId=${encodeURIComponent(state.businessId)}&apiKey=${encodeURIComponent(state.apiKey)}`);
+                    const data = await res.json();
+                    if (data.success) {
+                        state.businessName = data.businessName || data.config.nombreNegocio || 'Mi Negocio';
+                        if (data.config && data.config.moneda) state.currency = data.config.moneda;
+                        if (data.productos) state.products = data.productos;
+                        saveLocal();
+                        state.view = 'pos';
+                        render();
+                        return;
+                    } else {
+                        state.error = data.error || 'Credenciales inválidas';
+                        render();
+                        return;
+                    }
+                } catch(err) {
+                    console.warn('No se pudo conectar al servidor GAS, usando modo offline local:', err);
+                }
+            }
+
+            // Modo offline o fallback
+            if (state.products.length === 0) {
+                state.products = [
+                    { id: 'PROD-01', nombre: 'Café Grano 500g', categoria: 'Bebidas', precioVenta: 225, costo: 150, stock: 38 },
+                    { id: 'PROD-02', nombre: 'Chocolate Artesanal', categoria: 'Dulces', precioVenta: 85, costo: 45, stock: 15 }
+                ];
+            }
+            state.view = 'pos';
+            saveLocal();
+            render();
+        }
+
+        function logout() {
+            state.view = 'login';
+            render();
+        }
+
+        function switchView(v) {
+            state.view = v;
+            render();
+        }
+
+        // Vista POS (Punto de Venta)
+        function renderPos() {
+            const totalCart = state.cart.reduce((acc, item) => acc + (item.precioVenta * item.qty), 0);
+            return `
+                <div class="p-4 space-y-4">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-sm font-bold text-white">Punto de Venta (POS)</h2>
+                        <span class="text-xs text-slate-400">${state.cart.length} productos en carrito</span>
+                    </div>
+
+                    <!-- Lista de Productos -->
+                    <div class="grid grid-cols-2 gap-3 max-h-56 overflow-y-auto no-scrollbar">
+                        ${state.products.map(p => `
+                            <button onclick="addToCart('${p.id}')" class="bg-slate-950 border border-slate-800 p-3 rounded-xl text-left hover:border-indigo-500 transition-all active:scale-95">
+                                <div class="text-xs font-bold text-white truncate">${p.nombre}</div>
+                                <div class="text-[10px] text-slate-400">${state.currency}${p.precioVenta.toFixed(2)}</div>
+                                <div class="text-[10px] text-indigo-400 mt-1">Stock: ${p.stock}</div>
+                            </button>
+                        `).join('')}
+                    </div>
+
+                    <!-- Carrito Actual -->
+                    <div class="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
+                        <h3 class="text-xs font-bold text-slate-300">Carrito de Venta</h3>
+                        ${state.cart.length === 0 ? `<p class="text-xs text-slate-500 py-4 text-center">El carrito está vacío</p>` : `
+                            <div class="space-y-2 max-h-36 overflow-y-auto">
+                                ${state.cart.map((item, idx) => `
+                                    <div class="flex justify-between items-center text-xs bg-slate-900 p-2 rounded-lg">
+                                        <div>
+                                            <div class="font-medium text-white">${item.nombre}</div>
+                                            <div class="text-slate-400">${state.currency}${item.precioVenta} x ${item.qty}</div>
+                                        </div>
+                                        <div class="flex items-center gap-2">
+                                            <span class="font-bold text-indigo-400">${state.currency}${(item.precioVenta * item.qty).toFixed(2)}</span>
+                                            <button onclick="removeFromCart(${idx})" class="text-rose-400 hover:text-rose-300 px-1.5 py-0.5 bg-rose-500/10 rounded">×</button>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                            <div class="pt-2 border-t border-slate-800 flex justify-between items-center font-bold text-sm">
+                                <span>Total a Pagar:</span>
+                                <span class="text-emerald-400">${state.currency}${totalCart.toFixed(2)}</span>
+                            </div>
+                            <button onclick="checkout()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs transition-all shadow-lg shadow-emerald-600/20">
+                                Cobrar Venta
+                            </button>
+                        `}
+                    </div>
+                </div>
+            `;
+        }
+
+        function addToCart(id) {
+            const prod = state.products.find(p => p.id === id);
+            if (!prod || prod.stock <= 0) return alert('Sin stock disponible');
+            const exist = state.cart.find(item => item.id === id);
+            if (exist) {
+                if (exist.qty < prod.stock) exist.qty++;
+                else alert('Stock máximo alcanzado');
+            } else {
+                state.cart.push({ ...prod, qty: 1 });
+            }
+            render();
+        }
+
+        function removeFromCart(idx) {
+            state.cart.splice(idx, 1);
+            render();
+        }
+
+        function checkout() {
+            if (state.cart.length === 0) return;
+            const total = state.cart.reduce((acc, item) => acc + (item.precioVenta * item.qty), 0);
+            const tx = {
+                type: 'VENTA',
+                i
